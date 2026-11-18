@@ -14,7 +14,12 @@ Run:
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
 
 import matplotlib
 
@@ -25,19 +30,19 @@ import pandas as pd
 import stackstac
 import xarray as xr
 
-from src.sentinel_tool.config import (
+from sentinel_tool.config import (
     AOI_BBOX,
     AOI_NAME,
     CLOUD_THRESHOLD,
     PREVIEW_WINDOW,
-    SEASON_WINDOW,
     S1_GRD_COLLECTION,
     S2_COLLECTION,
+    SEASON_WINDOW,
+    utm_epsg,
 )
-from src.sentinel_tool.indices import ndvi
-from src.sentinel_tool.stac import search_items
+from sentinel_tool.indices import dn_to_reflectance, ndvi
+from sentinel_tool.stac import search_items
 
-ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "outputs"
 OUT.mkdir(exist_ok=True)
 
@@ -54,32 +59,39 @@ def cloud_gap_audit() -> pd.DataFrame:
 
     rows = []
     for item in s2_items:
+        raw_cloud = item.properties.get("eo:cloud_cover")
+        cloud = float(raw_cloud) if raw_cloud is not None else np.nan
         rows.append(
             {
                 "month": item.datetime.strftime("%Y-%m"),
                 "sensor": "S2",
-                "cloud_pct": float(item.properties.get("eo:cloud_cover", np.nan)),
+                "cloud_pct": cloud,
+                "usable": bool(np.isfinite(cloud) and cloud < CLOUD_THRESHOLD),
             }
         )
     for item in s1_items:
-        rows.append({"month": item.datetime.strftime("%Y-%m"), "sensor": "S1", "cloud_pct": np.nan})
+        rows.append(
+            {
+                "month": item.datetime.strftime("%Y-%m"),
+                "sensor": "S1",
+                "cloud_pct": np.nan,
+                "usable": True,  # every SAR scene is usable regardless of cloud
+            }
+        )
+
+    if not rows:
+        print("  no scenes found in window; skipping CSV and plot")
+        return pd.DataFrame()
 
     df = pd.DataFrame(rows)
-
     summary = (
         df.groupby(["month", "sensor"])
-        .agg(scenes=("sensor", "size"), median_cloud_pct=("cloud_pct", "median"))
+        .agg(
+            scenes=("sensor", "size"),
+            usable_scenes=("usable", "sum"),
+            median_cloud_pct=("cloud_pct", "median"),
+        )
         .reset_index()
-    )
-    summary["usable_scenes"] = np.where(
-        summary["sensor"] == "S2",
-        df[df.sensor == "S2"].assign(usable=lambda d: d.cloud_pct < CLOUD_THRESHOLD)
-        .groupby("month")["usable"]
-        .sum()
-        .reindex(summary["month"])
-        .fillna(0)
-        .values,
-        summary["scenes"],  # every SAR scene is usable regardless of cloud
     )
 
     wide = summary.pivot(index="month", columns="sensor", values=["scenes", "usable_scenes"])
@@ -102,7 +114,13 @@ def plot_cloud_gap(wide: pd.DataFrame) -> None:
 
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.bar(x - width, wide.get("scenes_S2", 0), width, label="S2 scenes acquired", color="#4C78A8")
-    ax.bar(x, wide.get("usable_scenes_S2", 0), width, label=f"S2 usable (<{CLOUD_THRESHOLD:.0f}% cloud)", color="#F58518")
+    ax.bar(
+        x,
+        wide.get("usable_scenes_S2", 0),
+        width,
+        label=f"S2 usable (<{CLOUD_THRESHOLD:.0f}% cloud)",
+        color="#F58518",
+    )
     ax.bar(x + width, wide.get("scenes_S1", 0), width, label="S1 scenes (all-weather)", color="#54A24B")
 
     ax.set_xticks(x)
@@ -129,29 +147,39 @@ def raster_preview() -> None:
     if not items:
         print("  no scenes in preview window; skipping")
         return
-    item = min(items, key=lambda it: it.properties.get("eo:cloud_cover", 100))
-    print(f"  scene {item.id}  cloud={item.properties.get('eo:cloud_cover'):.1f}%")
+    item = min(
+        items,
+        key=lambda it: float(it.properties["eo:cloud_cover"])
+        if it.properties.get("eo:cloud_cover") is not None
+        else 100.0,
+    )
+    cloud = item.properties.get("eo:cloud_cover")
+    cloud_str = f"{float(cloud):.1f}%" if cloud is not None else "unknown"
+    print(f"  scene {item.id}  cloud={cloud_str}")
 
     bands = ["B02", "B03", "B04", "B08", "B11"]  # blue, green, red, NIR, SWIR
+    epsg = utm_epsg((AOI_BBOX[0] + AOI_BBOX[2]) / 2.0, (AOI_BBOX[1] + AOI_BBOX[3]) / 2.0)
     stack = stackstac.stack(
         [item],
         assets=bands,
         bounds_latlon=AOI_BBOX,
-        epsg=32644,  # UTM 44N covers ~79 deg E
+        epsg=epsg,
         resolution=20,
         chunksize=1024,
     )
-    scene = stack.sel(band=bands).isel(time=0).compute() / 10_000.0
+    scene = dn_to_reflectance(stack.sel(band=bands).isel(time=0).compute(), item=item)
 
     blue, green, red, nir, swir = (scene.sel(band=b) for b in bands)
     nd = ndvi(red, nir)
 
     fig, axes = plt.subplots(1, 3, figsize=(17, 5))
 
-    axes[0].imshow(np.clip(np.stack([red, green, blue], axis=-1), 0, 0.3) * 3.3)
+    rgb = np.nan_to_num(np.stack([red, green, blue], axis=-1), nan=0.0)
+    axes[0].imshow(np.clip(rgb, 0.0, 0.3) / 0.3)
     axes[0].set_title("True colour (RGB)")
 
-    axes[1].imshow(np.clip(np.stack([swir, nir, red], axis=-1), 0, 0.4) * 2.5)
+    fc = np.nan_to_num(np.stack([swir, nir, red], axis=-1), nan=0.0)
+    axes[1].imshow(np.clip(fc, 0.0, 0.4) / 0.4)
     axes[1].set_title("False colour (SWIR-NIR-Red)")
 
     im = axes[2].imshow(nd, cmap="RdYlGn", vmin=-0.2, vmax=0.8)
@@ -174,7 +202,11 @@ def raster_preview() -> None:
         dims=("y", "x"),
         coords={"y": nd.y.values, "x": nd.x.values},
         name="ndvi",
-        attrs={"long_name": "NDVI (Sentinel-2), derived from B04/B08"},
+        attrs={
+            "long_name": "NDVI (Sentinel-2), derived from B04/B08",
+            "crs": f"EPSG:{epsg}",
+            "scene_id": item.id,
+        },
     )
     clean.to_netcdf(OUT / "ndvi_preview.nc")
     print("  saved outputs/ndvi_preview.nc")

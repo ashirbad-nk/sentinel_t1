@@ -1,7 +1,8 @@
 """Generate 10 cloudless ~30 MP PNG/JPEG images of iconic Indian regions.
 
-Each image uses the single clearest Sentinel-2 L2A scene (dry-season window)
-clipped to a 60 x 50 km AOI, giving 6000 x 5000 px at native 10 m resolution.
+Each image uses the minimum number of near-cloudless Sentinel-2 L2A scenes
+(dry-season window) clipped to a 60 x 50 km AOI, giving ~6000 x 5000 px at
+native 10 m resolution.
 
 Run:
     python make_cloudless.py                       # JPEG gallery (default)
@@ -12,15 +13,20 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
 
 from PIL import Image, ImageDraw
 
-from src.sentinel_tool.config import S2_COLLECTION
-from src.sentinel_tool.mosaic import composite, load_scene_rgb, pick_scenes, stretch
-from src.sentinel_tool.stac import search_items
+from sentinel_tool.config import S2_COLLECTION
+from sentinel_tool.mosaic import composite, load_scene_rgb, pick_scenes, stretch
+from sentinel_tool.stac import search_items
 
-ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "outputs" / "gallery"
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -42,6 +48,10 @@ WINDOW = "2025-11-01T00:00:00Z/2026-02-28T23:59:59Z"
 W_KM, H_KM = 60, 50  # -> 6000 x 5000 px at 10 m = 30 MP
 
 
+def slugify(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
 def bbox_km(lon: float, lat: float) -> tuple[float, float, float, float]:
     """60x50 km box centred on (lon, lat), in EPSG:4326."""
     dlat = H_KM / 111.32
@@ -50,7 +60,7 @@ def bbox_km(lon: float, lat: float) -> tuple[float, float, float, float]:
 
 
 def generate_one(name: str, lat: float, lon: float, fmt: str):
-    slug = name.lower().replace(" ", "_").replace("-", "").replace(",", "")
+    slug = slugify(name)
     bbox = bbox_km(lon, lat)
     items = list(search_items(S2_COLLECTION, bbox=bbox, datetime_=WINDOW))
     if not items:
@@ -58,8 +68,11 @@ def generate_one(name: str, lat: float, lon: float, fmt: str):
         return None
 
     scenes, coverage = pick_scenes(items, bbox)
+    if not scenes:
+        print(f"  !! no usable scenes for {name}")
+        return None
     clouds = [i.properties.get("eo:cloud_cover", 999) for i in scenes]
-    print(f"  {len(scenes)} scene(s), cloud={[round(c, 3) for c in clouds]}%, coverage={coverage:.3f}")
+    print(f"  {len(scenes)} scene(s), cloud={[round(float(c), 3) for c in clouds]}%, coverage={coverage:.3f}")
 
     layers = [load_scene_rgb(item, bbox, resolution=10) for item in scenes]
     rgb = composite(layers)
@@ -71,28 +84,31 @@ def generate_one(name: str, lat: float, lon: float, fmt: str):
     else:
         img.save(path)
     print(f"  saved {path.relative_to(ROOT)}  {img.size[0]}x{img.size[1]} = {img.size[0]*img.size[1]/1e6:.1f} MP")
-    return path, img
+
+    # Immediately downscale to a small thumbnail so the 30 MP image is freed.
+    thumb = img.copy()
+    thumb.thumbnail((360, 300))
+    img.close()
+    del img, rgb, layers
+    return path, thumb
 
 
 def contact_sheet(entries, fmt: str):
     """Small labelled overview of all generated images."""
-    thumbs = []
-    for name, (_, img) in entries:
-        t = img.copy()
-        t.thumbnail((360, 300))
-        thumbs.append((name, t))
-
-    cols = 5
-    rows = math.ceil(len(thumbs) / cols)
+    cols = min(5, len(entries))
+    rows = math.ceil(len(entries) / cols)
     tw, th = 380, 330
     sheet = Image.new("RGB", (cols * tw, rows * th), "white")
     draw = ImageDraw.Draw(sheet)
-    for i, (name, t) in enumerate(thumbs):
+    for i, (name, (_, thumb)) in enumerate(entries):
         x, y = (i % cols) * tw, (i // cols) * th
-        sheet.paste(t, (x + 10, y + 10))
+        sheet.paste(thumb, (x + 10, y + 10))
         draw.text((x + 10, y + 305), name, fill="black")
     path = OUT / f"contact_sheet.{fmt}"
-    sheet.save(path, quality=90)
+    if fmt == "jpg":
+        sheet.save(path, quality=90)
+    else:
+        sheet.save(path)
     print(f"\nContact sheet: {path.relative_to(ROOT)}")
 
 
@@ -102,7 +118,7 @@ def main():
     ap.add_argument("--regions", type=int, default=0, help="limit to first N regions (0=all)")
     args = ap.parse_args()
 
-    regions = REGIONS[: args.regions] if args.regions else REGIONS
+    regions = REGIONS[: args.regions] if args.regions > 0 else REGIONS
     entries = []
     for i, (name, lat, lon) in enumerate(regions, 1):
         print(f"[{i}/{len(regions)}] {name}")

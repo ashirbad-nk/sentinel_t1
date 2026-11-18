@@ -1,18 +1,17 @@
 """Helpers for searching Planetary Computer's STAC catalog."""
 from __future__ import annotations
 
-from typing import Any
-
 import planetary_computer as pc
-from pystac_client import Client
 from pystac import ItemCollection
+from pystac_client import Client
 
-from .config import STAC_URL, AOI_BBOX, SEASON_WINDOW
+from .config import AOI_BBOX, SEASON_WINDOW, STAC_URL
 
 
-def open_catalog() -> Client:
-    """Open the Planetary Computer STAC catalog with asset signing enabled."""
-    return Client.open(STAC_URL, modifier=pc.sign_inplace)
+def open_catalog(*, sign: bool = True) -> Client:
+    """Open the Planetary Computer STAC catalog (with optional asset signing)."""
+    modifier = pc.sign_inplace if sign else None
+    return Client.open(STAC_URL, modifier=modifier)
 
 
 def search_items(
@@ -21,13 +20,14 @@ def search_items(
     datetime_: str = SEASON_WINDOW,
     max_items: int | None = None,
     limit: int = 100,
+    sign: bool = True,
 ) -> ItemCollection:
     """Search a single collection over the AOI and time window.
 
-    Returns a pystac ItemCollection (items are already signed by the catalog
-    modifier, so their asset hrefs can be opened directly by rasterio).
+    Returns a pystac ItemCollection (items are signed by default so their asset
+    hrefs can be opened directly by rasterio).
     """
-    catalog = open_catalog()
+    catalog = open_catalog(sign=sign)
     search = catalog.search(
         collections=[collection],
         bbox=list(bbox),

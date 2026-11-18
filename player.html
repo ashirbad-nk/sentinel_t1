@@ -23,6 +23,7 @@
   .log { font:11px monospace; color:#8b949e; white-space:pre-wrap; word-break:break-all;
          background:#161b22; padding:8px; border-radius:6px; max-height:300px; overflow-y:auto; }
   .pill { display:inline-block; background:#21262d; padding:2px 8px; border-radius:10px; font-size:12px; }
+  .hint { font-size:11px; color:#6e7681; margin-top:8px; }
 </style>
 </head>
 <body>
@@ -43,11 +44,13 @@
     <div class="row"><span>fps</span><input id="fps" type="range" min="1" max="30" value="10"></div>
     <div class="row"><input id="scrub" type="range" min="0" max="0" value="0"></div>
     <div class="log" id="log"></div>
+    <div class="hint">Keys: Space = play/pause • ← / → = step frame</div>
   </div>
 </div>
 <script>
 const view = document.getElementById('view');
 const dateEl = document.getElementById('date');
+const cloudEl = document.getElementById('cloud');
 const prog = document.getElementById('progress');
 const barfill = document.getElementById('barfill');
 const etaEl = document.getElementById('eta');
@@ -58,12 +61,28 @@ const fps = document.getElementById('fps');
 const fpslabel = document.getElementById('fpslabel');
 const playBtn = document.getElementById('play');
 
-let frames = [], idx = 0, playing = true, timer = null, clouds = {};
-fetch('/frames/clouds.json', {cache:'no-store'}).then(r => r.json()).then(d => clouds = d).catch(()=>{});
+let frames = [], idx = 0, playing = true, started = false, timer = null, clouds = {};
+
+async function loadClouds() {
+  try {
+    const r = await fetch('/frames/clouds.json', {cache: 'no-store'});
+    if (r.ok) {
+      clouds = await r.json();
+      if (frames.length) updateCloudLabel(frames[idx]);
+    }
+  } catch (_) {}
+}
+
+function updateCloudLabel(name) {
+  cloudEl.textContent =
+    'cloud (whole tile): ' + (clouds[name] != null ? clouds[name] + '%' : '—');
+}
 
 async function poll() {
   try {
-    const s = await (await fetch('/api/status', {cache:'no-store'})).json();
+    const r = await fetch('/api/status', {cache: 'no-store'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const s = await r.json();
     const old = frames.length;
     frames = s.frames;
     if (frames.length !== old) {
@@ -75,36 +94,78 @@ async function poll() {
     prog.textContent = `${s.done} / ${s.total} frames  •  ${s.discarded} discarded  •  ${s.errors} errors`;
     const m = Math.floor(s.eta_seconds / 60), sec = s.eta_seconds % 60;
     etaEl.textContent = `ETA ~${m}m ${sec}s  •  ~${s.avg_seconds_per_frame}s/frame × ${s.workers} workers  •  updated ${s.updated}`;
-    yearsEl.textContent = Object.entries(s.by_year).map(([y,c]) => `${y}:${c}`).join('   ');
+    yearsEl.textContent = Object.entries(s.by_year).map(([y, c]) => `${y}:${c}`).join('   ');
     logEl.textContent = s.recent.slice(-25).reverse().join('\n');
-    if (frames.length && !timer) { show(); schedule(); }
-  } catch (e) { prog.textContent = 'server error: ' + e; }
+
+    if (frames.length && !started) {
+      started = true;
+      show();
+      if (playing) schedule();
+    } else if (frames.length && playing && timer === null) {
+      schedule();
+    }
+
+    if (!Object.keys(clouds).length) loadClouds();
+  } catch (e) {
+    prog.textContent = 'server error: ' + e;
+  }
 }
 
 function show() {
   if (!frames.length) return;
   if (idx >= frames.length) idx = frames.length - 1;
   const name = frames[idx];
-  view.src = '/frames/' + name + '.jpg?' + Date.now();
+  // Frames are written atomically and immutable; let the browser cache them cleanly.
+  view.src = '/frames/' + name + '.jpg';
   dateEl.textContent = name;
-  document.getElementById('cloud').textContent =
-    'cloud (whole tile): ' + (clouds[name] != null ? clouds[name] + '%' : '—');
+  updateCloudLabel(name);
   scrub.value = idx;
 }
-function schedule() {
-  clearTimeout(timer);
-  if (playing && frames.length) {
-    timer = setTimeout(() => { idx = (idx + 1) % frames.length; show(); schedule(); }, 1000 / +fps.value);
+
+function stopTimer() {
+  if (timer !== null) {
+    clearTimeout(timer);
+    timer = null;
   }
 }
-playBtn.onclick = () => {
+
+function schedule() {
+  stopTimer();
+  if (playing && frames.length) {
+    timer = setTimeout(() => {
+      timer = null;
+      idx = (idx + 1) % frames.length;
+      show();
+      schedule();
+    }, 1000 / +fps.value);
+  }
+}
+
+function togglePlay() {
   playing = !playing;
   playBtn.textContent = playing ? 'Pause' : 'Play';
-  if (playing) schedule(); else clearTimeout(timer);
-};
-fps.oninput = () => { fpslabel.textContent = fps.value + ' fps'; schedule(); };
+  if (playing) schedule(); else stopTimer();
+}
+
+playBtn.onclick = togglePlay;
+fps.oninput = () => { fpslabel.textContent = fps.value + ' fps'; if (playing) schedule(); };
 scrub.oninput = () => { idx = +scrub.value; show(); };
 
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+  else if (e.code === 'ArrowRight' && frames.length) {
+    if (playing) togglePlay();
+    idx = (idx + 1) % frames.length;
+    show();
+  } else if (e.code === 'ArrowLeft' && frames.length) {
+    if (playing) togglePlay();
+    idx = (idx - 1 + frames.length) % frames.length;
+    show();
+  }
+});
+
+loadClouds();
 poll();
 setInterval(poll, 4000);
 </script>

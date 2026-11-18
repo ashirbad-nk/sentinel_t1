@@ -6,28 +6,33 @@ Each image is one complete native tile (10980 x 10980 px = 120.6 MP) — no
 clipping and no stitching.
 
 Run:
-    python make_tiles.py --targets 1    # test one target (3 images)
-    python make_tiles.py                # all 10 targets
+    python make_tiles.py --targets 1      # test one target (3 images)
+    python make_tiles.py                  # all 10 targets
     python make_tiles.py --skip-existing  # resume
 """
 from __future__ import annotations
 
 import argparse
 import re
+import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
 
 from PIL import Image, ImageDraw
 
 Image.MAX_IMAGE_PIXELS = None  # 120 MP images are intentional here
 from shapely.geometry import Point, shape
 
-from src.sentinel_tool.config import S2_COLLECTION
-from src.sentinel_tool.fulltile import load_fulltile_rgb
-from src.sentinel_tool.solar import solar_elevation
-from src.sentinel_tool.stac import search_items
+from sentinel_tool.config import S2_COLLECTION
+from sentinel_tool.fulltile import load_fulltile_rgb
+from sentinel_tool.solar import solar_elevation
+from sentinel_tool.stac import search_items
 
-ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "outputs" / "tiles"
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -44,7 +49,7 @@ TARGETS = [
     ("Himalayas - Darjeeling", 27.0410, 88.2663),
 ]
 
-WINDOW = "2024-01-01T00:00:00Z/2026-11-30T23:59:59Z"
+DEFAULT_WINDOW = f"2024-01-01T00:00:00Z/{datetime.now(timezone.utc).strftime('%Y-%m-%dT23:59:59Z')}"
 N_OPTIONS = 3
 
 
@@ -62,7 +67,8 @@ def choose_options(items, lat: float, lon: float):
     point = Point(lon, lat)
     raw = []
     for item in items:
-        cloud = float(item.properties.get("eo:cloud_cover", 999))
+        raw_cloud = item.properties.get("eo:cloud_cover")
+        cloud = float(raw_cloud) if raw_cloud is not None else 999.0
         if cloud > 2.0 or not item.geometry:
             continue
         geom = shape(item.geometry)
@@ -85,7 +91,7 @@ def choose_options(items, lat: float, lon: float):
     if not candidates:
         return []
 
-    # Prefer the tile with the most strictly cloud-free scenes.
+    # Prefer strictly cloud-free (<0.5%) scenes and the tile with the most of them.
     strict = [c for c in candidates if c[1] < 0.5]
     pool = strict or candidates
     counts: dict[str, int] = {}
@@ -94,10 +100,14 @@ def choose_options(items, lat: float, lon: float):
         counts[code] = counts.get(code, 0) + 1
     best_tile = max(counts, key=counts.get)
 
-    options = [c for c in candidates if tile_code(c[2]) == best_tile]
-    if not options:
-        options = pool
-    options.sort(key=lambda c: c[0], reverse=True)
+    options = [c for c in pool if tile_code(c[2]) == best_tile]
+    if len(options) < N_OPTIONS:
+        # Top up from looser (<2%) candidates on the same tile only if needed.
+        seen_ids = {c[2].id for c in options}
+        extras = [c for c in candidates if tile_code(c[2]) == best_tile and c[2].id not in seen_ids]
+        options.extend(extras)
+    # Sort by highest sun elevation first, breaking ties by lowest cloud cover.
+    options.sort(key=lambda c: (-c[0], c[1]))
 
     if len(options) <= N_OPTIONS:
         return options
@@ -105,12 +115,17 @@ def choose_options(items, lat: float, lon: float):
     return [options[i] for i in idx]
 
 
-def generate(name: str, lat: float, lon: float, skip_existing: bool):
+def generate(name: str, lat: float, lon: float, skip_existing: bool, window: str):
     folder = OUT / slug(name)
     folder.mkdir(exist_ok=True)
-    items = list(search_items(S2_COLLECTION, bbox=(lon - 0.05, lat - 0.05,
-                                                    lon + 0.05, lat + 0.05),
-                              datetime_=WINDOW, limit=500))
+    items = list(
+        search_items(
+            S2_COLLECTION,
+            bbox=(lon - 0.05, lat - 0.05, lon + 0.05, lat + 0.05),
+            datetime_=window,
+            limit=500,
+        )
+    )
     options = choose_options(items, lat, lon)
     if not options:
         print(f"  !! no cloud-free options for {name}")
@@ -132,8 +147,10 @@ def generate(name: str, lat: float, lon: float, skip_existing: bool):
         rgb = load_fulltile_rgb(item)
         Image.fromarray(rgb).save(path, quality=90, subsampling=0)
         mp = rgb.shape[0] * rgb.shape[1] / 1e6
-        print(f"    saved {path.name}  {rgb.shape[1]}x{rgb.shape[0]} = {mp:.1f} MP"
-              f"  ({time.time()-t0:.0f}s, {path.stat().st_size/1e6:.0f} MB)")
+        print(
+            f"    saved {path.name}  {rgb.shape[1]}x{rgb.shape[0]} = {mp:.1f} MP"
+            f"  ({time.time()-t0:.0f}s, {path.stat().st_size/1e6:.0f} MB)"
+        )
         del rgb
         saved.append((name, elev, cloud, path))
     return saved
@@ -142,18 +159,24 @@ def generate(name: str, lat: float, lon: float, skip_existing: bool):
 def make_sheet(entries, path: Path, title: str):
     cols = min(3, len(entries))
     tw, th = 400, 300
+    header_h = 28 if title else 0
     rows = (len(entries) + cols - 1) // cols
-    sheet = Image.new("RGB", (cols * tw, rows * th), "white")
+    sheet = Image.new("RGB", (cols * tw, header_h + rows * th), "white")
     draw = ImageDraw.Draw(sheet)
+    if title:
+        draw.text((8, 6), title, fill="black")
     for i, entry in enumerate(entries):
         name, elev, cloud, p = entry
-        img = Image.open(p)
-        img.draft("RGB", (tw * 2, th * 2))  # fast JPEG decode at reduced scale
-        img.thumbnail((tw - 10, th - 40))
-        x, y = (i % cols) * tw, (i // cols) * th
-        sheet.paste(img, (x + 5, y + 5))
-        draw.text((x + 5, y + th - 32), f"{name}\nsun {elev:.1f}deg | cloud {cloud:.2f}%",
-                  fill="black")
+        with Image.open(p) as img:
+            img.draft("RGB", (tw * 2, th * 2))  # fast JPEG decode at reduced scale
+            img.thumbnail((tw - 10, th - 40))
+            x, y = (i % cols) * tw, header_h + (i // cols) * th
+            sheet.paste(img, (x + 5, y + 5))
+        draw.text(
+            (x + 5, y + th - 32),
+            f"{name}\nsun {elev:.1f}deg | cloud {cloud:.2f}%",
+            fill="black",
+        )
     sheet.save(path, quality=88)
     print(f"  sheet: {path.relative_to(ROOT)}")
 
@@ -163,19 +186,26 @@ def main():
     ap.add_argument("--targets", type=int, default=0, help="limit to first N targets (0=all)")
     ap.add_argument("--start", type=int, default=0, help="first target index (1-based)")
     ap.add_argument("--end", type=int, default=0, help="last target index (1-based, inclusive)")
+    ap.add_argument("--window", default=DEFAULT_WINDOW, help="STAC ISO datetime interval")
     ap.add_argument("--skip-existing", action="store_true")
     ap.add_argument("--no-master", action="store_true")
     args = ap.parse_args()
 
+    if args.targets < 0 or args.start < 0 or args.end < 0:
+        ap.error("--targets, --start, and --end must be non-negative")
+    if args.start and args.end and args.end < args.start:
+        ap.error("--end must be >= --start")
+
     targets = TARGETS[: args.targets] if args.targets else TARGETS
     if args.start:
-        targets = targets[args.start - 1:]
+        targets = targets[args.start - 1 :]
     if args.end:
         targets = targets[: args.end - args.start + 1] if args.start else targets[: args.end]
+
     all_entries = []
     for i, (name, lat, lon) in enumerate(targets, 1):
         print(f"\n[{i}/{len(targets)}] {name}")
-        entries = generate(name, lat, lon, args.skip_existing)
+        entries = generate(name, lat, lon, args.skip_existing, args.window)
         if not entries:
             continue
         all_entries.append(entries[0])  # highest-sun option for master sheet

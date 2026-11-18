@@ -1,27 +1,28 @@
 # Core
-numpy
-pandas
-matplotlib
-xarray
-dask
-scipy
+numpy>=1.26
+pandas>=2.1
+matplotlib>=3.8
+xarray>=2024.1
+dask>=2024.1
+scipy>=1.11
 
 # Geospatial / raster
-rasterio
-rioxarray
-shapely
-geopandas
+rasterio>=1.3.9
+shapely>=2.0
 
 # STAC / cloud data access (Planetary Computer)
-pystac-client
-planetary-computer
-stackstac
+pystac-client>=0.7
+planetary-computer>=1.0
+stackstac>=0.5
 
-# Image output / solar geometry
-pillow
-astral
-h5py
+# Image output / solar geometry / NetCDF4 backend
+pillow>=10.0
+astral>=3.2
+h5py>=3.10
+h5netcdf>=1.3
 
 # Notebooks
-jupyter
-ipykernel
+jupyter>=1.0
+ipykernel>=6.29
+
+# Note: `timelapse.py --encode` also requires `ffmpeg` on PATH.
