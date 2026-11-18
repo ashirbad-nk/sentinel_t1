@@ -240,11 +240,12 @@ def encode(frames: Path) -> None:
         return
     listfile = frames / "frames.txt"
     listfile.write_text("".join(f"file '{p}'\n" for p in files))
-    out = ROOT / "outputs" / "timelapse_2019_2023.mp4"
+    out = ROOT / "outputs" / f"timelapse_{frames.name.replace('frames_', '')}_2015_2026.mp4"
     out.parent.mkdir(exist_ok=True)
     subprocess.run([
         "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(listfile),
-        "-vf", "scale=1080:1920", "-r", "10", "-c:v", "libx264",
+        "-vf", "setpts=N/(10*TB),scale=1080:1920", "-fps_mode", "passthrough",
+        "-c:v", "libx264",
         "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p", str(out),
     ], check=True)
     print(f"encoded {len(files)} frames -> {out}")
