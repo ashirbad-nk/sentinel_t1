@@ -1,0 +1,27 @@
+# Core
+numpy
+pandas
+matplotlib
+xarray
+dask
+scipy
+
+# Geospatial / raster
+rasterio
+rioxarray
+shapely
+geopandas
+
+# STAC / cloud data access (Planetary Computer)
+pystac-client
+planetary-computer
+stackstac
+
+# Image output / solar geometry
+pillow
+astral
+h5py
+
+# Notebooks
+jupyter
+ipykernel
