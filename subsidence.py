@@ -64,11 +64,9 @@ def detrend_plane(arr: np.ndarray, valid: np.ndarray, degree: int = 1) -> np.nda
     return out.astype("float32")
 
 
-def pair_days(entry) -> int:
-    """Number of days between the reference and secondary acquisitions."""
+def pair_days(dt) -> int:
+    """Number of days between reference and secondary, from an open datatree."""
     try:
-        from nisar_play import open_datatree, resolve_signed
-        dt = open_datatree(resolve_signed(entry["url"]))
         ident = dt["/science/LSAR/identification"]
         r = str(ident["referenceZeroDopplerStartTime"].values)
         s = str(ident["secondaryZeroDopplerStartTime"].values)
@@ -116,7 +114,7 @@ def process_pair(entry, lat, lon):
     except Exception:
         pass
     vertical = los_mm / np.cos(np.deg2rad(inc))
-    days = pair_days(entry)
+    days = pair_days(dt)
     rate = vertical / days * 365.0
     return rate, coh, inc, days
 
@@ -154,7 +152,11 @@ def main():
 
     from subsidence_learn import gunw_candidates
     cands = gunw_candidates()
-    picks = cands[-args.pairs:]
+    if len(cands) > args.pairs:
+        idx = [round(i * (len(cands) - 1) / (args.pairs - 1)) for i in range(args.pairs)]
+        picks = [cands[i] for i in idx]
+    else:
+        picks = cands
     print(f"{args.city}: stacking {len(picks)} GUNW pairs "
           f"({picks[0]['date'][:10]} -> {picks[-1]['date'][:10]})\n")
 
