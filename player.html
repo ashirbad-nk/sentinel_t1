@@ -61,21 +61,26 @@ const fps = document.getElementById('fps');
 const fpslabel = document.getElementById('fpslabel');
 const playBtn = document.getElementById('play');
 
-let frames = [], idx = 0, playing = true, started = false, timer = null, clouds = {};
+let frames = [], idx = 0, playing = true, started = false, timer = null, clouds = {}, meta = {};
 
 async function loadClouds() {
   try {
     const r = await fetch('/frames/clouds.json', {cache: 'no-store'});
-    if (r.ok) {
-      clouds = await r.json();
-      if (frames.length) updateCloudLabel(frames[idx]);
-    }
+    if (r.ok) clouds = await r.json();
   } catch (_) {}
+  try {
+    const r = await fetch('/frames/meta.json', {cache: 'no-store'});
+    if (r.ok) meta = await r.json();
+  } catch (_) {}
+  if (frames.length) updateCloudLabel(frames[idx]);
 }
 
 function updateCloudLabel(name) {
-  cloudEl.textContent =
-    'cloud (whole tile): ' + (clouds[name] != null ? clouds[name] + '%' : '—');
+  if (meta[name]) {
+    cloudEl.textContent = 'NISAR HVHV: ' + meta[name].mean_db.toFixed(1) + ' dB  |  ' + meta[name].collection;
+  } else {
+    cloudEl.textContent = 'cloud (whole tile): ' + (clouds[name] != null ? clouds[name] + '%' : '—');
+  }
 }
 
 async function poll() {

@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "outputs" / "nisar"
 OUT.mkdir(parents=True, exist_ok=True)
 
-LAT, LON = 23.0507771, 72.5448828        # Gujarat AOI from the timelapse work
-START, END = datetime(2025, 6, 1), datetime(2026, 11, 19)
+LAT, LON = 23.0507771, 72.5448828        # default Gujarat AOI (override with --lat/--lon)
+START, END = datetime(2025, 1, 1), datetime(2026, 11, 19)
 PRODUCT = "GCOV"
 
 
@@ -320,21 +320,115 @@ def cmd_series(args):
         print("Wrote outputs/nisar/series_contact.jpg")
 
 
+def cmd_play(args):
+    """Generate per-date frames for the live web player."""
+    import csv
+    import numpy as np
+    from PIL import Image
+
+    global LAT, LON
+    LAT, LON = args.lat, args.lon
+    frames = ROOT / f"frames_{args.tag}"
+    frames.mkdir(exist_ok=True)
+    log = frames / "fetch_0.log"
+
+    granules = find_granules(1000)
+    by_date = {}
+    for g in granules:
+        p = g.properties
+        if p.get("productionConfiguration") != "PR" or not p.get("url", "").endswith(".h5"):
+            continue
+        sz = granule_h5_bytes(p)
+        if sz < 1e8:
+            continue
+        date = p.get("startTime", "")[:10]
+        # prefer validated collection (no BETA / PROVISIONAL in the name)
+        rank = 0 if not any(k in str(p.get("collectionName", ""))
+                            for k in ("BETA", "PROVISIONAL")) else 1
+        cur = by_date.get(date)
+        if cur is None or (rank, -sz) < (cur[0], -cur[1]):
+            by_date[date] = (rank, sz, p["url"], p["sceneName"], p.get("collectionName", ""))
+
+    dates = sorted(by_date)
+    if not dates:
+        print("No usable products.")
+        return
+    manifest = {"entries": [{"date": d} for d in dates]}
+    (frames / "manifest.json").write_text(json.dumps(manifest))
+    print(f"Manifest: {len(dates)} dates -> {frames.name}/manifest.json", flush=True)
+
+    meta = {}
+    for i, date in enumerate(dates):
+        final = frames / f"{date}.jpg"
+        if final.exists():
+            print(f"[{i+1}/{len(dates)}] {date} cached", flush=True)
+            continue
+        _, _, url, name, coll = by_date[date]
+        t0 = __import__("time").time()
+        try:
+            dt = open_datatree(resolve_signed(url))
+            node = dt["/science/LSAR/GCOV/grids/frequencyA"]
+            epsg = int(node["projection"].attrs.get("epsg_code", 32643))
+            da = subset_to_aoi(node["HVHV"], LAT, LON, size_m=args.window, epsg=epsg)
+            if da is None:
+                raise ValueError("no AOI coverage")
+            a = np.asarray(da.values, dtype="float32")
+            db = 10 * np.log10(a + 1e-12)
+            valid = np.isfinite(db)
+            if not valid.any():
+                raise ValueError("no valid samples")
+            mean_db = float(db[valid].mean())
+            lo, hi = np.nanpercentile(db[valid], [2, 98])
+            img = np.clip((db - lo) / (hi - lo + 1e-6), 0, 1)
+            tmp = frames / f".tmp_{date}.jpg"
+            frame_img = Image.fromarray((img * 255).astype("uint8")).convert("RGB")
+            # Some GCOV products are 20 m, others 10 m -> same 12 km window gives
+            # 600 vs 1200 px. Normalise so the player never changes scale.
+            grid = 1200 if args.window >= 12000 else 600
+            if frame_img.size != (grid, grid):
+                frame_img = frame_img.resize((grid, grid), Image.BILINEAR)
+            frame_img.save(tmp, quality=90)
+            tmp.replace(final)
+            meta[date] = {"mean_db": round(mean_db, 2), "collection": coll, "scene": name}
+            msg = f"{date} OK ({__import__('time').time()-t0:.0f}s) mean={mean_db:.1f}dB [{i+1}/{len(dates)}]"
+            with log.open("a") as f:
+                f.write(msg + "\n")
+            print("  " + msg, flush=True)
+        except Exception as exc:
+            msg = f"{date} ERROR {type(exc).__name__}: {exc}"
+            with log.open("a") as f:
+                f.write(msg + "\n")
+            print("  " + msg, flush=True)
+        (frames / "meta.json").write_text(json.dumps(meta))
+
+    with (frames / "meta.csv").open("w", newline="") as f:
+        w = csv.writer(f); w.writerow(["date", "mean_db", "collection", "scene"])
+        for d in sorted(meta):
+            m = meta[d]; w.writerow([d, m["mean_db"], m["collection"], m["scene"]])
+    print(f"Done. {len(meta)} frames in {frames.name}/", flush=True)
+
+
 def main():
+    global LAT, LON
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("search", "browse", "fetch", "inspect", "series"):
+    for name in ("search", "browse", "fetch", "inspect", "series", "play"):
         p = sub.add_parser(name)
+        p.add_argument("--lat", type=float, default=LAT)
+        p.add_argument("--lon", type=float, default=LON)
         if name in ("search", "browse"):
             p.add_argument("--limit", type=int, default=10 if name == "browse" else 100)
-        if name in ("inspect", "series"):
+        if name in ("inspect", "series", "play"):
             p.add_argument("--window", type=int, default=12000, help="AOI window size in metres")
         if name == "series":
             p.add_argument("--count", type=int, default=6, help="number of dates")
+        if name == "play":
+            p.add_argument("--tag", default="nisar_odisha", help="frame dir tag")
     args = ap.parse_args()
+    LAT, LON = args.lat, args.lon
     {"search": cmd_search, "browse": cmd_browse, "fetch": cmd_fetch,
-     "inspect": cmd_inspect, "series": cmd_series}[args.cmd](args)
+     "inspect": cmd_inspect, "series": cmd_series, "play": cmd_play}[args.cmd](args)
 
 
 if __name__ == "__main__":
