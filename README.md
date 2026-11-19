@@ -113,6 +113,33 @@ python serve.py --tag gandhinagar --port 8767
 
 ---
 
+## NISAR play (L-band SAR, local, FOSS)
+
+`nisar_play.py` sources real NISAR GCOV granules from NASA ASF via `asf_search` /
+`earthaccess`, authenticated from `~/.netrc` (free Earthdata Login). No proprietary
+service. Granules are ~6 GB HDF5, so `inspect` and `series` use **HTTPS range reads** —
+they subset the AOI without downloading the full file.
+
+```bash
+# 1. list granules over the Gujarat AOI (23.05N, 72.54E)
+python nisar_play.py search --limit 10
+
+# 2. instant visual: browse PNGs -> outputs/nisar/browse.html
+python nisar_play.py browse --limit 6
+
+# 3. real pixels: subset HH/HV to a 12 km window -> PNG + GeoTIFF
+python nisar_play.py inspect --window 12000
+
+# 4. multi-date backscatter time series -> CSV, plot, contact sheet
+python nisar_play.py series --count 6
+
+# optional: full 6 GB HDF5 download for offline tinkering
+python nisar_play.py fetch
+```
+
+Products: GCOV (geocoded gamma-0 backscatter, HH/HV). Data from 2025 onward only.
+Credentials come from `~/.netrc` — never from script arguments.
+
 ## Testing
 
 ```bash
